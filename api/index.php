@@ -10,56 +10,17 @@ if ($_SERVER['REQUEST_METHOD'] == 'OPTIONS') {
     exit;
 }
 
-// --- Rate Limiting ---
-// function check_rate_limit() {
-//     $ip = $_SERVER['REMOTE_ADDR'];
-//     $rate_limit_file = "rate_limits/{$ip}.json";
-    
-//     if (!is_dir('rate_limits')) {
-//         mkdir('rate_limits');
-//     }
-    
-//     $current_time = time();
-//     $window_size = 60; // 1 minute
-//     $max_requests = 60; // 60 requests per minute
-    
-//     if (file_exists($rate_limit_file)) {
-//         $data = json_decode(file_get_contents($rate_limit_file), true);
-//         $data = array_filter($data, function($timestamp) use ($current_time, $window_size) {
-//             return $current_time - $timestamp < $window_size;
-//         });
-        
-//         if (count($data) >= $max_requests) {
-//             http_response_code(429);
-//             echo json_encode(['error' => 'Too many requests. Please try again later.']);
-//             exit;
-//         }
-        
-//         $data[] = $current_time;
-//     } else {
-//         $data = [$current_time];
-//     }
-    
-//     file_put_contents($rate_limit_file, json_encode($data));
-// }
-
-// Check rate limit for the request
-// check_rate_limit();
-
 // --- Data Loading ---
-// Load restaurant and order data from JSON files. In a real application, this would come from a database.
 $restaurants = json_decode(file_get_contents('restaurants.json'), true);
 $orders = json_decode(file_get_contents('orders.json'), true);
 
 // --- Request Parsing ---
-// Get the requested endpoint from the URL path.
 $request_uri = $_SERVER['REQUEST_URI'];
 $path = parse_url($request_uri, PHP_URL_PATH);
 $path_parts = explode('/', $path);
 $endpoint = end($path_parts);
 
 // --- API Routing ---
-// Route the request to the appropriate function based on the endpoint.
 $cache_key = get_cache_key();
 $cached_response = get_cached_response($cache_key);
 
@@ -93,10 +54,6 @@ echo $response;
 
 // --- Handler Functions ---
 
-/**
- * Handles requests for the /restaurants endpoint.
- * Supports searching, filtering by cuisine/location, sorting, and pagination.
- */
 function handle_restaurants($restaurants) {
     $filtered_restaurants = $restaurants;
 
@@ -160,12 +117,8 @@ function handle_restaurants($restaurants) {
     ]);
 }
 
-/**
- * Handles requests for the /analytics endpoint.
- * Calculates metrics based on various filters like date range, restaurant, etc.
- */
 function handle_analytics($orders, $restaurants) {
-    // Validate date range
+    // Validate inputs
     $date_error = validate_date_range(
         $_GET['startDate'] ?? null,
         $_GET['endDate'] ?? null
@@ -176,7 +129,6 @@ function handle_analytics($orders, $restaurants) {
         return;
     }
     
-    // Validate amount range
     $amount_error = validate_numeric_range(
         $_GET['minAmount'] ?? null,
         $_GET['maxAmount'] ?? null,
@@ -188,7 +140,6 @@ function handle_analytics($orders, $restaurants) {
         return;
     }
     
-    // Validate hour range
     $hour_error = validate_numeric_range(
         $_GET['startHour'] ?? null,
         $_GET['endHour'] ?? null,
@@ -201,53 +152,23 @@ function handle_analytics($orders, $restaurants) {
     }
 
     $filtered_orders = $orders;
-
-    // Filter by restaurant ID
-    if (isset($_GET['restaurant_id'])) {
-        $restaurant_id = (int)$_GET['restaurant_id'];
-        $filtered_orders = array_filter($filtered_orders, function($order) use ($restaurant_id) {
-            return $order['restaurant_id'] === $restaurant_id;
-        });
-    }
-
-    // Filter by date range
-    $start_date = isset($_GET['startDate']) ? new DateTime($_GET['startDate']) : null;
-    $end_date = isset($_GET['endDate']) ? (new DateTime($_GET['endDate']))->setTime(23, 59, 59) : null;
-    if ($start_date && $end_date) {
-        $filtered_orders = array_filter($filtered_orders, function($order) use ($start_date, $end_date) {
-            $order_date = new DateTime($order['order_time']);
-            return $order_date >= $start_date && $order_date <= $end_date;
-        });
-    }
     
-    // Filter by amount range
-    $min_amount = isset($_GET['minAmount']) ? (float)$_GET['minAmount'] : null;
-    $max_amount = isset($_GET['maxAmount']) ? (float)$_GET['maxAmount'] : null;
-    if ($min_amount !== null && $max_amount !== null) {
-        $filtered_orders = array_filter($filtered_orders, function($order) use ($min_amount, $max_amount) {
-            return $order['order_amount'] >= $min_amount && $order['order_amount'] <= $max_amount;
-        });
-    }
-
-    // Filter by hour range
-    $start_hour = isset($_GET['startHour']) ? (int)$_GET['startHour'] : null;
-    $end_hour = isset($_GET['endHour']) ? (int)$_GET['endHour'] : null;
-     if ($start_hour !== null && $end_hour !== null) {
-        $filtered_orders = array_filter($filtered_orders, function($order) use ($start_hour, $end_hour) {
-            $order_hour = (int)(new DateTime($order['order_time']))->format('G');
-            return $order_hour >= $start_hour && $order_hour <= $end_hour;
-        });
-    }
-
-    // --- Analytics Calculations ---
+    // Apply all filters
+    $filtered_orders = apply_filters($filtered_orders, $_GET);
+    
+    // Calculate analytics
     $daily_data = [];
     $total_revenue = 0;
     $total_orders = count($filtered_orders);
+    $weekly_peak_hours = array_fill(0, 7, array_fill(0, 24, 0));
 
     foreach ($filtered_orders as $order) {
-        $date = (new DateTime($order['order_time']))->format('Y-m-d');
-        $hour = (int)(new DateTime($order['order_time']))->format('G');
+        $datetime = new DateTime($order['order_time']);
+        $date = $datetime->format('Y-m-d');
+        $hour = (int)$datetime->format('G');
+        $day_of_week = (int)$datetime->format('w');
         
+        // Initialize daily data
         if (!isset($daily_data[$date])) {
             $daily_data[$date] = [
                 'date' => $date,
@@ -257,35 +178,124 @@ function handle_analytics($orders, $restaurants) {
             ];
         }
         
+        // Update metrics
         $daily_data[$date]['orders']++;
         $daily_data[$date]['revenue'] += $order['order_amount'];
         $daily_data[$date]['hourly_orders'][$hour]++;
+        $weekly_peak_hours[$day_of_week][$hour]++;
         $total_revenue += $order['order_amount'];
     }
 
-    // Calculate peak hour for each day
+    // Calculate daily peak hours
     foreach ($daily_data as $date => &$data) {
-        $peak_hour = array_keys($data['hourly_orders'], max($data['hourly_orders']))[0];
-        $data['peak_hour'] = $peak_hour . ':00 - ' . ($peak_hour + 1) . ':00';
-        unset($data['hourly_orders']); // Clean up response
+        $max_orders = max($data['hourly_orders']);
+        if ($max_orders > 0) {
+            $peak_hour = array_search($max_orders, $data['hourly_orders']);
+            $data['peak_hour'] = sprintf('%02d:00 - %02d:00', $peak_hour, ($peak_hour + 1) % 24);
+        } else {
+            $data['peak_hour'] = 'No orders';
+        }
+        unset($data['hourly_orders']);
+    }
+
+    // Calculate weekly peak hours - return top 3 hours for each day
+    $peak_hours_formatted = [];
+    for ($day = 0; $day < 7; $day++) {
+        $day_hours = $weekly_peak_hours[$day];
+        arsort($day_hours);
+        
+        $top_hours = [];
+        $count = 0;
+        foreach ($day_hours as $hour => $order_count) {
+            if ($order_count > 0 && $count < 3) {
+                $top_hours[] = sprintf('%02d:00 - %02d:00', $hour, ($hour + 1) % 24);
+                $count++;
+            }
+        }
+        $peak_hours_formatted[$day] = $top_hours;
     }
 
     // Sort daily data by date
     ksort($daily_data);
 
-    // --- Top Restaurants Calculation ---
-    // Note: This calculation ignores the restaurant_id filter to find the overall top restaurants
-    $restaurant_revenue = [];
-    $top_restaurants_orders = $orders; // Use original orders for this metric
+    // Calculate top restaurants (use all orders for overall ranking)
+    $top_restaurants = calculate_top_restaurants($orders, $restaurants, $_GET);
+
+    $response = [
+        'summary' => [
+            'total_revenue' => round($total_revenue, 2),
+            'total_orders' => $total_orders,
+            'average_order_value' => $total_orders > 0 ? round($total_revenue / $total_orders, 2) : 0,
+        ],
+        'daily_trends' => array_values($daily_data),
+        'top_restaurants' => $top_restaurants,
+        'peak_hours' => $peak_hours_formatted
+    ];
+
+    echo json_encode($response);
+}
+
+function apply_filters($orders, $params) {
+    $filtered_orders = $orders;
     
-    // Apply date filter if present
-    if ($start_date && $end_date) {
+    // Filter by restaurant ID
+    if (isset($params['restaurant_id']) && !empty($params['restaurant_id'])) {
+        $restaurant_id = (int)$params['restaurant_id'];
+        $filtered_orders = array_filter($filtered_orders, function($order) use ($restaurant_id) {
+            return $order['restaurant_id'] === $restaurant_id;
+        });
+    }
+
+    // Filter by date range
+    if (isset($params['startDate']) && isset($params['endDate'])) {
+        $start_date = new DateTime($params['startDate']);
+        $end_date = (new DateTime($params['endDate']))->setTime(23, 59, 59);
+        
+        $filtered_orders = array_filter($filtered_orders, function($order) use ($start_date, $end_date) {
+            $order_date = new DateTime($order['order_time']);
+            return $order_date >= $start_date && $order_date <= $end_date;
+        });
+    }
+    
+    // Filter by amount range
+    if (isset($params['minAmount']) && isset($params['maxAmount'])) {
+        $min_amount = (float)$params['minAmount'];
+        $max_amount = (float)$params['maxAmount'];
+        
+        $filtered_orders = array_filter($filtered_orders, function($order) use ($min_amount, $max_amount) {
+            return $order['order_amount'] >= $min_amount && $order['order_amount'] <= $max_amount;
+        });
+    }
+
+    // Filter by hour range
+    if (isset($params['startHour']) && isset($params['endHour'])) {
+        $start_hour = (int)$params['startHour'];
+        $end_hour = (int)$params['endHour'];
+        
+        $filtered_orders = array_filter($filtered_orders, function($order) use ($start_hour, $end_hour) {
+            $order_hour = (int)(new DateTime($order['order_time']))->format('G');
+            return $order_hour >= $start_hour && $order_hour <= $end_hour;
+        });
+    }
+
+    return $filtered_orders;
+}
+
+function calculate_top_restaurants($orders, $restaurants, $params) {
+    // Apply date filter for top restaurants calculation
+    $top_restaurants_orders = $orders;
+    
+    if (isset($params['startDate']) && isset($params['endDate'])) {
+        $start_date = new DateTime($params['startDate']);
+        $end_date = (new DateTime($params['endDate']))->setTime(23, 59, 59);
+        
         $top_restaurants_orders = array_filter($top_restaurants_orders, function($order) use ($start_date, $end_date) {
             $order_date = new DateTime($order['order_time']);
             return $order_date >= $start_date && $order_date <= $end_date;
         });
     }
 
+    $restaurant_revenue = [];
     foreach ($top_restaurants_orders as $order) {
         $id = $order['restaurant_id'];
         if (!isset($restaurant_revenue[$id])) {
@@ -305,36 +315,21 @@ function handle_analytics($orders, $restaurants) {
         if (!empty($restaurant_info)) {
             $top_3_restaurants[] = [
                 'name' => $restaurant_info[0]['name'],
-                'revenue' => $revenue
+                'revenue' => round($revenue, 2)
             ];
         }
         $count++;
     }
-
-    // --- Final Response Assembly ---
-    $response = [
-        'summary' => [
-            'total_revenue' => $total_revenue,
-            'total_orders' => $total_orders,
-            'average_order_value' => $total_orders > 0 ? round($total_revenue / $total_orders, 2) : 0,
-        ],
-        'daily_trends' => array_values($daily_data),
-        'top_restaurants' => $top_3_restaurants
-    ];
-
-    echo json_encode($response);
+    
+    return $top_3_restaurants;
 }
 
-/**
- * Handles requests for the /trends endpoint.
- * Returns hourly, daily, and weekly trends
- */
 function handle_trends($orders) {
     $filtered_orders = array_filter($orders, function($order) {
         $order_date = new DateTime($order['order_time']);
         $now = new DateTime();
         $diff = $now->diff($order_date);
-        return $diff->days <= 30; // Last 30 days
+        return $diff->days <= 30;
     });
     
     $hourly_trends = [];
@@ -376,10 +371,6 @@ function handle_trends($orders) {
     ]);
 }
 
-/**
- * Handles requests for the /statistics endpoint.
- * Returns advanced statistics and insights
- */
 function handle_statistics($orders, $restaurants) {
     $stats = [
         'peak_hours' => [],
@@ -391,7 +382,7 @@ function handle_statistics($orders, $restaurants) {
     $day_hours = [];
     foreach ($orders as $order) {
         $datetime = new DateTime($order['order_time']);
-        $day = $datetime->format('w'); // 0 (Sunday) to 6 (Saturday)
+        $day = $datetime->format('w');
         $hour = $datetime->format('H');
         
         if (!isset($day_hours[$day][$hour])) {
@@ -425,35 +416,38 @@ function handle_statistics($orders, $restaurants) {
     echo json_encode($stats);
 }
 
-/**
- * Validates date range parameters
- */
 function validate_date_range($start_date, $end_date) {
     if ($start_date && $end_date) {
-        $start = new DateTime($start_date);
-        $end = new DateTime($end_date);
-        $now = new DateTime();
-        
-        if ($start > $end) {
-            return "Start date cannot be after end date";
-        }
-        if ($start > $now || $end > $now) {
-            return "Dates cannot be in the future";
+        try {
+            $start = new DateTime($start_date);
+            $end = new DateTime($end_date);
+            $now = new DateTime();
+            
+            if ($start > $end) {
+                return "Start date cannot be after end date";
+            }
+            if ($start > $now || $end > $now) {
+                return "Dates cannot be in the future";
+            }
+        } catch (Exception $e) {
+            return "Invalid date format";
         }
     }
     return null;
 }
 
-/**
- * Validates numeric range parameters
- */
 function validate_numeric_range($min, $max, $field) {
     if ($min !== null && $max !== null) {
         if (!is_numeric($min) || !is_numeric($max)) {
             return "$field must be numeric";
         }
+        $min = (float)$min;
+        $max = (float)$max;
         if ($min > $max) {
             return "Minimum $field cannot be greater than maximum";
+        }
+        if ($field === 'hour' && ($min < 0 || $max > 23)) {
+            return "Hour must be between 0 and 23";
         }
     }
     return null;
@@ -461,12 +455,12 @@ function validate_numeric_range($min, $max, $field) {
 
 // --- Caching Functions ---
 function get_cache_key() {
-    return md5($_SERVER['REQUEST_URI']);
+    return md5($_SERVER['REQUEST_URI'] . serialize($_GET));
 }
 
 function get_cached_response($key) {
     $cache_file = "cache/{$key}.json";
-    if (file_exists($cache_file) && (time() - filemtime($cache_file) < 300)) { // 5 minutes cache
+    if (file_exists($cache_file) && (time() - filemtime($cache_file) < 300)) {
         return file_get_contents($cache_file);
     }
     return null;
